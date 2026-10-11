@@ -9,9 +9,9 @@ st.set_page_config(page_title="Clinic Scheduler", page_icon="🏥", layout="cent
 DB = "scheduler.db"
 SLOTS = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
          "14:00", "14:30", "15:00", "15:30", "16:00", "16:30"]
-DOCTORS = ["Dr. Asha Menon - Cardiology", "Dr. Rohan Verma - Orthopedics",
-           "Dr. Priya Nair - Pediatrics", "Dr. Imran Qureshi - General Medicine",
-           "Dr. Lena Fischer - Dermatology"]
+DEFAULT_DOCTORS = [("Dr. Asha Menon", "Cardiology"), ("Dr. Rohan Verma", "Orthopedics"),
+                   ("Dr. Priya Nair", "Pediatrics"), ("Dr. Imran Qureshi", "General Medicine"),
+                   ("Dr. Lena Fischer", "Dermatology")]
 ICON = {"Pending": "🟡", "Approved": "🟢", "Rejected": "🔴"}
 
 
@@ -22,17 +22,33 @@ def conn():
         id INTEGER PRIMARY KEY, patient TEXT NOT NULL, phone TEXT NOT NULL,
         doctor TEXT NOT NULL, day TEXT NOT NULL, slot TEXT NOT NULL,
         reason TEXT, status TEXT NOT NULL DEFAULT 'Pending')""")
+    c.execute("""CREATE TABLE IF NOT EXISTS doctors(
+        id INTEGER PRIMARY KEY, name TEXT NOT NULL, specialty TEXT NOT NULL,
+        UNIQUE(name, specialty))""")
+    if not c.execute("SELECT 1 FROM doctors").fetchone():
+        c.executemany("INSERT INTO doctors(name, specialty) VALUES (?,?)", DEFAULT_DOCTORS)
+        c.commit()
     # a slot is blocked by Pending/Approved bookings; rejected ones free it again
     c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS one_per_slot
                  ON bookings(doctor, day, slot) WHERE status != 'Rejected'""")
     return c
 
 
+def get_doctors():
+    with conn() as c:
+        return [f"{r['name']} - {r['specialty']}" for r in
+                c.execute("SELECT name, specialty FROM doctors ORDER BY name")]
+
+
 # ---------------- patient: book ----------------
 def book_page():
     st.title("🏥 Book an appointment")
     st.caption("Your request is sent to the hospital for approval.")
-    doctor = st.selectbox("Doctor", DOCTORS)
+    doctors = get_doctors()
+    if not doctors:
+        st.warning("No doctors are available right now. Please check back later.")
+        return
+    doctor = st.selectbox("Doctor", doctors)
     day = st.date_input("Date", min_value=date.today()).isoformat()
     with conn() as c:
         taken = {r["slot"] for r in c.execute(
@@ -107,6 +123,47 @@ def admin_page():
         st.session_state["admin"] = False
         st.rerun()
 
+    tab_appts, tab_docs = st.tabs(["Appointments", "Doctors"])
+    with tab_appts:
+        admin_appointments()
+    with tab_docs:
+        admin_doctors()
+
+
+def admin_doctors():
+    st.subheader("Add a doctor")
+    with st.form("add_doctor", clear_on_submit=True):
+        name = st.text_input("Doctor name", placeholder="Dr. Anil Kumar")
+        specialty = st.text_input("Profession / specialty", placeholder="Neurology")
+        added = st.form_submit_button("Add doctor", type="primary")
+    if added:
+        if not name.strip() or not specialty.strip():
+            st.error("Enter both the doctor's name and profession.")
+        else:
+            try:
+                with conn() as c:
+                    c.execute("INSERT INTO doctors(name, specialty) VALUES (?,?)",
+                              (name.strip(), specialty.strip()))
+                st.success(f"Added {name.strip()} ({specialty.strip()}). Patients can book them now.")
+            except sqlite3.IntegrityError:
+                st.error("This doctor is already in the list.")
+
+    st.subheader("Current doctors")
+    with conn() as c:
+        docs = c.execute("SELECT * FROM doctors ORDER BY name").fetchall()
+    if not docs:
+        st.info("No doctors yet. Add one above.")
+    for d in docs:
+        with st.container(border=True):
+            st.markdown(f"**{d['name']}**  \n{d['specialty']}")
+            if st.button("Remove", key=f"rd{d['id']}"):
+                with conn() as c:
+                    c.execute("DELETE FROM doctors WHERE id=?", (d["id"],))
+                st.rerun()
+    st.caption("Removing a doctor stops new bookings. Existing appointments are kept.")
+
+
+def admin_appointments():
     with conn() as c:
         counts = {r["status"]: r["n"] for r in c.execute(
             "SELECT status, COUNT(*) n FROM bookings GROUP BY status")}
@@ -149,4 +206,4 @@ nav = st.navigation([
     st.Page(admin_page, title="Admin", icon="🔒", url_path="admin"),
 ])
 nav.run()
-               
+
